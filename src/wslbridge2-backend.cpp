@@ -393,7 +393,14 @@ int main(int argc, char *argv[])
         }
 
         for (int i = optind; i < argc; ++i)
-            childParams.argv.push_back(argv[i]);
+        {
+            if (argv[i][0] != '"') {
+                childParams.argv.push_back(argv[i]);
+            } else {
+                argv[i][strlen(argv[i]) - 1] = '\0';
+                childParams.argv.push_back(argv[i] + 1);
+            }
+        }
 
         if (childParams.argv.empty())
         {

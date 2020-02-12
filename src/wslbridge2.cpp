@@ -165,6 +165,8 @@ static void invalid_arg(const char *arg)
 
 int main(int argc, char *argv[])
 {
+    setlocale(LC_ALL, "");
+
     /* Minimum requirement Windows 10 build 17763 aka. version 1809 */
     if (GetWindowsBuild() < 17763)
         fatal("Windows 10 version is older than minimal requirement.\n");
