@@ -1,27 +1,22 @@
 /* 
  * This file is part of wslbridge2 project.
  * Licensed under the terms of the GNU General Public License v3 or later.
- * Copyright (C) Biswapriyo Nath.
+ * Copyright (C) 2019-2020 Biswapriyo Nath.
  */
 
 #include <arpa/inet.h>
 #include <assert.h>
 #include <getopt.h>
 #include <net/if.h>
-#include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <pty.h>
-#include <pwd.h>
 #include <signal.h>
-#include <stdio.h>
 #include <string.h>
 #include <sys/ioctl.h>
-#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
-#include <termios.h>
 #include <unistd.h>
 #include <wordexp.h>
 
@@ -30,6 +25,8 @@
 
 /* This requires linux-headers package */
 #include <linux/vm_sockets.h>
+
+#include "common.hpp"
 
 #ifndef ARRAYSIZE
 #define ARRAYSIZE(a) (sizeof(a)/sizeof((a)[0]))
@@ -124,6 +121,31 @@ static void CreateEnvironmentBlock(void)
     setenv("WSL_GUEST_IP", inet_ntoa(addr_in->sin_addr), false);
 
     close(sockfd);
+
+    unsigned long int dest, gateway;
+    char iface[IF_NAMESIZE];
+    char buf[4096];
+
+    memset(iface, 0, sizeof iface);
+    memset(buf, 0, sizeof buf);
+
+    FILE *routeFile = fopen("/proc/net/route", "r");
+
+    while (fgets(buf, sizeof buf, routeFile))
+    {
+        if (sscanf(buf, "%s %lx %lx", iface, &dest, &gateway) == 3)
+        {
+            if (dest == 0) /* default destination */
+            {
+                struct in_addr addr;
+                addr.s_addr = gateway;
+                setenv("WSL_HOST_IP", inet_ntoa(addr), false);
+                break;
+            }
+        }
+    }
+
+    fclose(routeFile);
 }
 
 static void usage(const char *prog)
@@ -160,6 +182,22 @@ struct ChildParams
     std::string cwd;
 };
 
+/* Structure only to hold socket file descriptors. */
+union IoSockets
+{
+    int sock[3];
+    struct
+    {
+        int inputSock;
+        int outputSock;
+        int controlSock;
+    };
+};
+
+/* Global variable. */
+static volatile union IoSockets ioSockets = { 0 };
+static volatile bool debugMode = false;
+
 int main(int argc, char *argv[])
 {
     if (argc < 2)
@@ -168,7 +206,6 @@ int main(int argc, char *argv[])
     int ret;
     struct winsize winp;
     struct ChildParams childParams;
-    bool debugMode = false;
     bool loginMode = false;
 
     /* Ports for WSL1 */
@@ -220,20 +257,12 @@ int main(int argc, char *argv[])
         assert(ret == 0);
     }
 
-    /* Structure only to hold socket file descriptors */
-    union IoSockets {
-        int sock[3];
-        struct {
-            int inputSock;
-            int outputSock;
-            int controlSock;
-        };
-    };
-    union IoSockets ioSockets = {};
-
     const bool vmMode = IsVmMode();
     if (vmMode) /* WSL2 */
     {
+        if (!initPort)
+            fatal("[WSL2] Error: Initialize port is not provided.\n");
+
         /* First connect to Windows side then send random port */
         const int client_sock = ConnectHvSock(initPort);
         const int server_sock = ListenVsockAnyPort(&randomPort, ARRAYSIZE(ioSockets.sock));
@@ -249,12 +278,8 @@ int main(int argc, char *argv[])
         }
         close(server_sock);
 
-        if (debugMode)
-        {
-            printf(
-            "cols: %d rows: %d initPort: %d randomPort: %d\n",
+        printf("cols: %d rows: %d initPort: %d randomPort: %u\n",
             winp.ws_col, winp.ws_row, initPort, randomPort);
-        }
     }
     else /* WSL1 */
     {
@@ -262,38 +287,43 @@ int main(int argc, char *argv[])
         ioSockets.outputSock = ConnectLocalSock(outputPort);
         ioSockets.controlSock = ConnectLocalSock(controlPort);
 
-        if (debugMode)
-        {
-            printf(
-            "cols: %d rows: %d in: %d out: %d con: %d\n",
+        printf("cols: %d rows: %d in: %d out: %d con: %d\n",
             winp.ws_col, winp.ws_row, inputPort, outputPort, controlPort);
-        }
     }
 
     int mfd;
     char ptyname[16];
     const pid_t child = forkpty(&mfd, ptyname, NULL, &winp);
-    if (child > 0 && debugMode)
-    {
-        printf(
-        "master fd: %d child pid: %d pty name: %s\n",
-        mfd, child, ptyname);
-    }
 
     if (child > 0) /* parent or master */
     {
+        /*
+         * wslbridge2#23: Wait for any child process changed state.
+         * i.e. prevent zombies. Register sigaction after forkpty (musl).
+         */
+        struct sigaction act = { 0 };
+        act.sa_flags = SA_SIGINFO;
+        act.sa_sigaction = [](int signum, siginfo_t *info, void *ucontext)
+        {
+            for (size_t i = 0; i < ARRAYSIZE(ioSockets.sock); i++)
+                shutdown(ioSockets.sock[i], SHUT_RDWR);
+
+            int status;
+            wait(&status);
+
+            char str[100];
+            int ret = sprintf(str, "signal: %d child status: %d child pid: %d\n",
+                        signum, status, info->si_pid);
+            ret = write(STDOUT_FILENO, str, ret);
+        };
+        sigaction(SIGCHLD, &act, NULL);
+
+        printf("master fd: %d child pid: %d pty name: %s\n",
+            mfd, child, ptyname);
+
         /* Use dupped master fd to read OR write */
         const int mfd_dp = dup(mfd);
         assert(mfd_dp > 0);
-
-        sigset_t set;
-        sigemptyset(&set);
-        sigaddset(&set, SIGCHLD);
-        ret = sigprocmask(SIG_BLOCK, &set, NULL);
-        assert(ret == 0);
-
-        const int sigfd = signalfd(-1, &set, 0);
-        assert(sigfd > 0);
 
         struct pollfd fds[] = {
                 { ioSockets.inputSock, POLLIN, 0 },
@@ -330,8 +360,7 @@ int main(int argc, char *argv[])
                 if (ret != 0)
                     perror("ioctl(TIOCSWINSZ)");
 
-                if (debugMode)
-                    printf("cols: %d rows: %d\n", winp.ws_col, winp.ws_row);
+                printf("cols: %d rows: %d\n", winp.ws_col, winp.ws_row);
             }
 
             /* Receive buffers from master and send to output socket */
@@ -345,23 +374,14 @@ int main(int argc, char *argv[])
             /* Shutdown I/O sockets when child process terminates */
             if (fds[2].revents & (POLLERR | POLLHUP))
             {
-                struct signalfd_siginfo sigbuff;
-                ret = read(sigfd, &sigbuff, sizeof sigbuff);
-                if (sigbuff.ssi_signo != SIGCHLD)
-                    perror("unexpected signal");
-
-                int wstatus;
-                if (waitpid(child, &wstatus, 0) != child)
-                    perror("waitpid");
-
                 for (size_t i = 0; i < ARRAYSIZE(ioSockets.sock); i++)
                     shutdown(ioSockets.sock[i], SHUT_RDWR);
+
                 break;
             }
         }
         while (writeRet > 0);
 
-        close(sigfd);
         close(mfd_dp);
         close(mfd);
     }
@@ -372,7 +392,10 @@ int main(int argc, char *argv[])
         for (char *const &setting : childParams.env)
             putenv(setting);
 
-        /* Set WSL_GUEST_IP environment variable */
+        /*
+         * wsltty#225: Set WSL_GUEST_IP environment variable in WSL2 only.
+         * As WSL1 gets same IP address as Windows and NIC may not be eth0.
+         */
         if (vmMode)
             CreateEnvironmentBlock();
 
@@ -448,6 +471,12 @@ int main(int argc, char *argv[])
     /* cleanup */
     for (size_t i = 0; i < ARRAYSIZE(ioSockets.sock); i++)
         close(ioSockets.sock[i]);
+
+    if (debugMode)
+    {
+        printf("Press any key to continue...\n");
+        getchar();
+    }
 
     return 0;
 }

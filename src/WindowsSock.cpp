@@ -1,7 +1,7 @@
 /* 
  * This file is part of wslbridge2 project.
  * Licensed under the terms of the GNU General Public License v3 or later.
- * Copyright (C) Biswapriyo Nath.
+ * Copyright (C) 2019-2020 Biswapriyo Nath.
  */
 
 #include <winsock2.h>
@@ -31,7 +31,8 @@ void WindowsSock(void)
 
 SOCKET CreateHvSock(void)
 {
-    const SOCKET sock = socket(AF_HYPERV, SOCK_STREAM, HV_PROTOCOL_RAW);
+    const SOCKET sock = WSASocketW(AF_HYPERV, SOCK_STREAM, HV_PROTOCOL_RAW,
+                            NULL, 0, WSA_FLAG_OVERLAPPED);
     assert(sock > 0);
 
     const int suspend = true;
@@ -49,7 +50,8 @@ SOCKET CreateHvSock(void)
 
 SOCKET CreateLocSock(void)
 {
-    const SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    const SOCKET sock = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP,
+                            NULL, 0, WSA_FLAG_OVERLAPPED);
     assert(sock > 0);
 
     const int flag = true;
@@ -67,14 +69,17 @@ SOCKET CreateLocSock(void)
 
 SOCKET AcceptHvSock(const SOCKET sock)
 {
-    const SOCKET cSock = accept(sock, NULL, NULL);
+    const SOCKET cSock = WSAAccept(sock, NULL, NULL, NULL, 0);
     assert(cSock > 0);
+
+    /* Server socket is no longer needed. */
+    closesocket(sock);
     return cSock;
 }
 
 SOCKET AcceptLocSock(const SOCKET sock)
 {
-    const SOCKET cSock = accept(sock, NULL, NULL);
+    const SOCKET cSock = WSAAccept(sock, NULL, NULL, NULL, 0);
     assert(cSock > 0);
 
     const int flag = true;
@@ -86,6 +91,8 @@ SOCKET AcceptLocSock(const SOCKET sock)
                            sizeof flag);
     assert(nodelayRet == 0);
 
+    /* Server socket is no longer needed. */
+    closesocket(sock);
     return cSock;
 }
 
@@ -105,11 +112,12 @@ void ConnectHvSock(const SOCKET sock, const GUID *VmId, const int port)
     memcpy(&addr.VmId, VmId, sizeof addr.VmId);
     memcpy(&addr.ServiceId, &HV_GUID_VSOCK_TEMPLATE, sizeof addr.ServiceId);
     addr.ServiceId.Data1 = port;
-    const int connectRet = connect(sock, (sockaddr*)&addr, sizeof addr);
+    const int connectRet = WSAConnect(sock, (sockaddr*)&addr, sizeof addr,
+                                NULL, NULL, NULL, NULL);
     assert(connectRet == 0);
 }
 
-int ListenHvSock(const SOCKET sock, const GUID *VmId, const int backlog)
+int ListenHvSock(const SOCKET sock, const GUID *VmId)
 {
     SOCKADDR_HV addr = {};
     addr.Family = AF_HYPERV;
@@ -117,8 +125,7 @@ int ListenHvSock(const SOCKET sock, const GUID *VmId, const int backlog)
     memcpy(&addr.ServiceId, &HV_GUID_VSOCK_TEMPLATE, sizeof addr.ServiceId);
 
     /* Try to bind to a dynamic port */
-    int nretries = 0;
-    int port;
+    int nretries = 0, port = 0;
 
     while (nretries < BIND_MAX_RETRIES)
     {
@@ -131,14 +138,15 @@ int ListenHvSock(const SOCKET sock, const GUID *VmId, const int backlog)
         nretries++;
     }
 
-    const int listenRet = listen(sock, backlog);
+    /* Listen for only one connection. */
+    const int listenRet = listen(sock, 1);
     assert(listenRet == 0);
 
     /* Return port number to caller */
     return port;
 }
 
-int ListenLocSock(const SOCKET sock, const int backlog)
+int ListenLocSock(const SOCKET sock)
 {
     /* Bind to any available port */
     sockaddr_in addr = {};
@@ -148,7 +156,8 @@ int ListenLocSock(const SOCKET sock, const int backlog)
     const int bindRet = bind(sock, (sockaddr*)&addr, sizeof addr);
     assert(bindRet == 0);
 
-    const int listenRet = listen(sock, backlog);
+    /* Listen for only one connection. */
+    const int listenRet = listen(sock, 1);
     assert(listenRet == 0);
 
     int addrLen = sizeof addr;

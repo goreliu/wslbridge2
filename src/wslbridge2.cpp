@@ -1,9 +1,10 @@
 /* 
  * This file is part of wslbridge2 project.
  * Licensed under the terms of the GNU General Public License v3 or later.
- * Copyright (C) Biswapriyo Nath.
+ * Copyright (C) 2019-2020 Biswapriyo Nath.
  */
 
+/* DO NOT include winsock.h, conflicts with poll.h. */
 #include <windows.h>
 #include <assert.h>
 #include <getopt.h>
@@ -28,25 +29,18 @@
 #include "Helpers.hpp"
 #include "Environment.hpp"
 #include "TerminalState.hpp"
-#include "WinHelper.hpp"
 #include "WindowsSock.hpp"
 
 #ifndef ARRAYSIZE
 #define ARRAYSIZE(a) (sizeof(a)/sizeof((a)[0]))
 #endif
 
-#ifdef __cplusplus
 extern "C" {
-#endif
-
 WINBASEAPI int WINAPI closesocket(SOCKET s);
 WINBASEAPI int WINAPI recv(SOCKET s, void *buf, int len, int flags);
 WINBASEAPI int WINAPI send(SOCKET s, void *buf, int len, int flags);
 WINBASEAPI int WINAPI WSACleanup(void);
-
-#ifdef __cplusplus
 }
-#endif
 
 union IoSockets
 {
@@ -60,7 +54,7 @@ union IoSockets
 };
 
 /* global variable */
-static union IoSockets g_ioSockets = { 0 };
+static volatile union IoSockets g_ioSockets = { 0, 0, 0 };
 
 static void resize_window(int signum)
 {
@@ -151,8 +145,6 @@ static void usage(const char *prog)
     "                Changes the working directory to Windows style path\n"
     "  -W, --wsldir  Folder\n"
     "                Changes the working directory to Unix style path\n"
-    "  -V, --wslver  1 or 2\n"
-    "                Indicates the WSL version of the selected distribution\n"
     "  -x, --xmod    Shows hidden backend window and debug output.\n"
     , prog);
     exit(0);
@@ -175,11 +167,15 @@ int main(int argc, char *argv[])
     cygwin_internal(CW_SYNC_WINENV);
 #endif
 
-    /* Set WSL_HOST_IP environment variable */
-    GetIp();
-
-    /* Set time as seed for generation of random port */
-    srand(time(NULL));
+    /*
+     * Set time as seed for generation of random port.
+     * wslbridge2 #24 and #27: Add aditional entropy
+     * to randomize port even in a split of seconds.
+     */
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    long seed = tv.tv_usec << 16 | (getpid() & 0xFFFF);
+    srand(seed);
 
     int ret;
     const char shortopts[] = "+b:d:e:hlu:w:W:V:x";
@@ -197,8 +193,6 @@ int main(int argc, char *argv[])
         { 0,               no_argument,       0,  0  },
     };
 
-    /* WinSock is initialized here */
-    WindowsSock();
     class Environment env;
     class TerminalState termState;
     std::string distroName;
@@ -206,7 +200,6 @@ int main(int argc, char *argv[])
     std::string winDir;
     std::string wslDir;
     std::string userName;
-    int wslVer = 0;
     bool debugMode = false;
     bool loginMode = false;
 
@@ -278,9 +271,7 @@ int main(int argc, char *argv[])
                 break;
 
             case 'V':
-                wslVer = atoi(optarg);
-                if (!optarg || !*optarg)
-                    invalid_arg("wslver");
+                /* empty */
                 break;
 
             case 'x':
@@ -318,39 +309,29 @@ int main(int argc, char *argv[])
         wslCmdLine.append(L"\"");
     }
 
-    /* Detect WSL version */
-    bool wslTwo = false;
-    if (wslVer)
-        wslTwo = wslVer > WSL_VERSION_ONE;
-    else
-    {
-        /* Check default distribution */
-        if (distroName.empty())
-            wslTwo = IsWslTwo(L"");
-        else
-            wslTwo = IsWslTwo(mbsToWcs(distroName));
-    }
+    /* Initialize WinSock. */
+    WindowsSock();
 
-    GUID VmId;
+    /* Intialize COM. */
+    ComInit();
+
+    GUID DistroId, VmId;
     SOCKET serverSock = 0;
     SOCKET inputSocket = 0;
     SOCKET outputSocket = 0;
     SOCKET controlSocket = 0;
 
-    if (wslTwo)
+    /* Detect WSL version. Assume distroName is initialized empty. */
+    const bool wslTwo = IsWslTwo(&DistroId, mbsToWcs(distroName));
+
+    if (wslTwo) /* WSL2: Use Hyper-V sockets. */
     {
-        int WslVersion;
-        const HRESULT hRes = GetVmId(&VmId, mbsToWcs(distroName), &WslVersion);
+        const HRESULT hRes = GetVmId(&DistroId, &VmId);
         if (hRes != 0)
             fatal("GetVmId: %s\n", GetErrorMessage(hRes).c_str());
-        if (WslVersion != WSL_VERSION_TWO)
-            fatal("This is for WSL2 distributions only\n");
 
         /* Create server to receive random port number */
         serverSock = CreateHvSock();
-
-        /* Listen for only one backend connection */
-        const int initPort = ListenHvSock(serverSock, &VmId, 1);
 
         struct winsize winp = {};
         ioctl(STDIN_FILENO, TIOCGWINSZ, &winp);
@@ -363,11 +344,11 @@ int main(int argc, char *argv[])
                 debugMode ? L"--xmod " : L"",
                 winp.ws_col,
                 winp.ws_row,
-                initPort);
+                ListenHvSock(serverSock, &VmId));
         assert(ret > 0);
         wslCmdLine.append(buffer.data());
     }
-    else
+    else /* WSL1: use localhost IPv4 sockets. */
     {
         inputSocket = CreateLocSock();
         outputSocket = CreateLocSock();
@@ -384,9 +365,9 @@ int main(int argc, char *argv[])
                 debugMode ? L"--xmod " : L"",
                 winp.ws_col,
                 winp.ws_row,
-                ListenLocSock(inputSocket, 1),
-                ListenLocSock(outputSocket, 1),
-                ListenLocSock(controlSocket, 1));
+                ListenLocSock(inputSocket),
+                ListenLocSock(outputSocket),
+                ListenLocSock(controlSocket));
         assert(ret > 0);
         wslCmdLine.append(buffer.data());
     }
@@ -431,11 +412,8 @@ int main(int argc, char *argv[])
     const struct PipeHandles outputPipe = createPipe();
     const struct PipeHandles errorPipe = createPipe();
 
-    /* Initialize thread attribute list */
-    HANDLE Values[2];
-    Values[0] = outputPipe.wh;
-    Values[1] = errorPipe.wh;
-
+    /* Initialize thread attribute list to inherit pipe handles. */
+    HANDLE Values[2] = { outputPipe.wh, errorPipe.wh };
     SIZE_T AttrSize;
     LPPROC_THREAD_ATTRIBUTE_LIST AttrList = NULL;
     InitializeProcThreadAttributeList(NULL, 1, 0, &AttrSize);
@@ -447,11 +425,19 @@ int main(int argc, char *argv[])
     if (!ret)
         fatal("UpdateProcThreadAttribute: %s", GetErrorMessage(GetLastError()).c_str());
 
+    DWORD CreationFlags = EXTENDED_STARTUPINFO_PRESENT;
     PROCESS_INFORMATION pi = {};
     STARTUPINFOEXW si = {};
     si.StartupInfo.cb = sizeof si;
-    if (!debugMode)
+
+    /* DO NOT use pipe handles to redirect output from debug window. */
+    if (debugMode)
     {
+        CreationFlags |= CREATE_NEW_CONSOLE;
+    }
+    else
+    {
+        CreationFlags |= CREATE_NO_WINDOW;
         si.lpAttributeList = AttrList;
         si.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
         si.StartupInfo.hStdOutput = outputPipe.wh;
@@ -464,7 +450,7 @@ int main(int argc, char *argv[])
             NULL,
             NULL,
             TRUE,
-            debugMode ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW,
+            CreationFlags,
             NULL,
             NULL,
             &si.StartupInfo,
@@ -499,20 +485,21 @@ int main(int argc, char *argv[])
             msg.append(err);
         }
 
-        termState.fatal("%s", msg.c_str());
+        /* Exit with error if output/error message is not empty. */
+        if (!msg.empty())
+            termState.fatal("%s", msg.c_str());
     });
 
     if (wslTwo)
     {
         const SOCKET sClient = AcceptHvSock(serverSock);
-        closesocket(serverSock);
 
         int randomPort = 0;
         ret = recv(sClient, &randomPort, sizeof randomPort, 0);
         assert(ret > 0);
         closesocket(sClient);
 
-        /* Create four I/O sockets and connect with WSL server */
+        /* Create I/O sockets and connect with WSL server */
         for (size_t i = 0; i < ARRAYSIZE(g_ioSockets.sock); i++)
         {
             g_ioSockets.sock[i] = CreateHvSock();
@@ -524,13 +511,9 @@ int main(int argc, char *argv[])
         g_ioSockets.inputSock = AcceptLocSock(inputSocket);
         g_ioSockets.outputSock = AcceptLocSock(outputSocket);
         g_ioSockets.controlSock = AcceptLocSock(controlSocket);
-
-        closesocket(inputSocket);
-        closesocket(outputSocket);
-        closesocket(controlSocket);
     }
 
-    /* Create thread to send window size through control socket */
+    /* Capture window resize signal and send buffer to control socket */
     struct sigaction act = {};
     act.sa_handler = resize_window;
     act.sa_flags = SA_RESTART;
@@ -549,8 +532,13 @@ int main(int argc, char *argv[])
 
     termState.enterRawMode();
 
-    pthread_join(tidInput, nullptr);
+    /*
+     * wsltty#254: WORKAROUND: Terminates input thread forcefully
+     * when output thread exits. Need some inter-thread syncing.
+     */
     pthread_join(tidOutput, nullptr);
+    pthread_kill(tidInput, 0);
+    // pthread_join(tidInput, nullptr);
 
     /* cleanup */
     for (size_t i = 0; i < ARRAYSIZE(g_ioSockets.sock); i++)

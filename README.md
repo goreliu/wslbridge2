@@ -1,7 +1,7 @@
 <!--
  * This file is part of wslbridge2 project.
  * Licensed under the terms of the GNU General Public License v3 or later.
- * Copyright (C) Biswapriyo Nath.
+ * Copyright (C) 2019-2020 Biswapriyo Nath.
  *
  * README.md: Main README file for wslbridge2 project
 -->
@@ -38,24 +38,20 @@ All binaries will be placed in `bin` folder.
 ## How to use
 
 Download the released stable binaries from [Release page][3]. Or to test
-nightly builds, download the wslbridge2.7z from this [Appveyor project link][5].
+nightly builds, download the wslbridge2.zip from this [Appveyor project link][5].
+Here are some info about the directories of this project.
 
-### hvsocket: sample C code using Hyper-V sockets
+### samples: sample C code using Hyper-V sockets
 
 Pick up any one of 1. `win_client` & `wsl_server` 2. `win_server` & `wsl_client`.
 Run `wsl.exe` first. Paste the VM ID from the last argument of `wslhost.exe`
 process's command line. Compile the `win_` part in cygwin or msys2 and
 the `wsl_` part in WSL. Run the server part first. It will wait for the client.
 
-### rawpty: use pseudo console with terminal emulators
-
-Run `rawpty.exe wsl.exe` command. This can also be any Windows console program.
-See the sample [screenshot](images/Headless_Mode.PNG) without headless mode.
-
 ### wslbridge2: connect with WSL using network sockets
 
 Place `wslbridge2.exe` and `wslbridge2-backend` in same Windows folder.
-Run `wslbridge2.exe`.
+Run `wslbridge2.exe`. This requires cygwin or msys2 environment.
 
 ### Options
 
@@ -70,7 +66,6 @@ Here are the list of valid options:
 * `-u` or `--user`: Run as the specified user in WSL.
 * `-w` or `--windir`: Changes the working directory to a Windows path.
 * `-W` or `--wsldir`: Changes the working directory to WSL path.
-* `-V` or `--wslver`: Indicates the WSL version of the selected distribution.
 * `-x` or `--xmod`: Shows hidden backend window and debug output.
 
 Always use single quote or double quote to mention any folder path. For paths
@@ -154,7 +149,7 @@ A full copy of the license is provided in [LICENSE](LICENSE).
 [2]: https://github.com/Biswa96/wslbridge2.git
 [3]: https://github.com/Biswa96/wslbridge2/releases
 [4]: https://ci.appveyor.com/project/Biswa96/wslbridge2
-[5]: https://ci.appveyor.com/api/projects/Biswa96/wslbridge2/artifacts/wslbridge2.7z?branch=master&job=Image%3A%20Visual%20Studio%202019
+[5]: https://ci.appveyor.com/api/projects/Biswa96/wslbridge2/artifacts/wslbridge2.zip?branch=master&job=Image%3A%20Visual%20Studio%202019
 [6]: https://docs.microsoft.com/en-us/virtualization/hyper-v-on-windows/user-guide/make-integration-service
 [7]: https://github.com/torvalds/linux/blob/master/net/vmw_vsock/af_vsock.c
 [8]: https://github.com/torvalds/linux/blob/master/include/uapi/linux/vm_sockets.h

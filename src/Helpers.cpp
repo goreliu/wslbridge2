@@ -1,20 +1,18 @@
 /* 
  * This file is part of wslbridge2 project.
  * Licensed under the terms of the GNU General Public License v3 or later.
- * Copyright (C) 2019 Biswapriyo Nath.
+ * Copyright (C) 2019-2020 Biswapriyo Nath.
  */
 
 #include <windows.h>
 #include <assert.h>
 #include <sys/cygwin.h>
-#include <sys/ioctl.h>
 
 #include <array>
 #include <algorithm>
-#include <string>
-#include <vector>
 
-#include "../src/common.hpp"
+#include "common.hpp"
+#include "Helpers.hpp"
 
 std::wstring mbsToWcs(const std::string &s)
 {
@@ -29,7 +27,7 @@ std::wstring mbsToWcs(const std::string &s)
     return ret;
 }
 
-std::string wcsToMbs(const std::wstring &s, bool emptyOnError=false)
+std::string wcsToMbs(const std::wstring &s, bool emptyOnError)
 {
     const size_t len = wcstombs(nullptr, s.c_str(), 0);
     if (len == static_cast<size_t>(-1))
@@ -81,14 +79,9 @@ wchar_t lowerDrive(wchar_t ch)
 
 std::wstring findSystemProgram(const wchar_t *name)
 {
-    std::array<wchar_t, MAX_PATH> windir;
-    windir[0] = L'\0';
-    if (GetWindowsDirectoryW(windir.data(), windir.size()) == 0)
-        fatal("error: GetWindowsDirectory call failed\n");
-
     const wchar_t *const kPart32 = L"\\System32\\";
     const auto path = [&](const wchar_t *part) -> std::wstring {
-        return std::wstring(windir.data()) + part + name;
+        return std::wstring(GetWinDir()) + part + name;
     };
 #if defined(__x86_64__)
     const auto ret = path(kPart32);
@@ -285,4 +278,32 @@ std::vector<char> readAllFromHandle(HANDLE h)
         ret.insert(ret.end(), buf, buf + actual);
     }
     return ret;
+}
+
+std::string GetErrorMessage(DWORD MessageId)
+{
+    wchar_t *Buffer = NULL;
+    const DWORD formatRet = FormatMessageW(
+                            FORMAT_MESSAGE_FROM_SYSTEM |
+                            FORMAT_MESSAGE_ALLOCATE_BUFFER |
+                            FORMAT_MESSAGE_IGNORE_INSERTS,
+                            NULL,
+                            MessageId,
+                            MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                            (PWSTR)&Buffer,
+                            0,
+                            NULL);
+
+    std::string msg;
+    if (formatRet == 0 || Buffer == NULL)
+    {
+        char buf[64];
+        sprintf(buf, "(%#x)", (unsigned int)MessageId);
+        msg = buf;
+    }
+    else
+        msg = wcsToMbs(Buffer);
+    LocalFree(Buffer);
+
+    return msg;
 }
